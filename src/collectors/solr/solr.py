@@ -96,120 +96,121 @@ class SolrCollector(diamond.collector.Collector):
             result = self._get('solr/admin/cores?action=STATUS&wt=json')
             if result:
                 cores = result['status'].keys()
+	metrics = {}
+        if cores:
+		for core in cores:
+			if core:
+				path = "{0}.".format(core)
+			else:
+				path = ""
+			ping_url = posixpath.normpath(
+				"solr/{0}/admin/ping?wt=json".format(core))
+			if 'response' in self.config['stats']:
+				result = self._get(ping_url)
+				if not result:
+					continue
 
-        metrics = {}
-        for core in cores:
-            if core:
-                path = "{0}.".format(core)
-            else:
-                path = ""
+				metrics.update({
+					"{0}response.QueryTime".format(path):
+					result["responseHeader"]["QTime"],
+					"{0}response.Status".format(path):
+					result["responseHeader"]["status"],
+				})
 
-            ping_url = posixpath.normpath(
-                "solr/{0}/admin/ping?wt=json".format(core))
+			stats_url = posixpath.normpath(
+				"solr/{0}/admin/mbeans?stats=true&wt=json".format(core))
+			result = self._get(stats_url)
+			if not result:
+				continue
 
-            if 'response' in self.config['stats']:
-                result = self._get(ping_url)
-                if not result:
-                    continue
+			s = result['solr-mbeans']
+			stats = dict((s[i], s[i+1]) for i in xrange(0, len(s), 2))
 
-                metrics.update({
-                    "{0}response.QueryTime".format(path):
-                    result["responseHeader"]["QTime"],
-                    "{0}response.Status".format(path):
-                    result["responseHeader"]["status"],
-                })
+			if 'core' in self.config['stats']:
+				core_searcher = stats["CORE"]["searcher"]["stats"]
+				metrics.update([
+					("{0}core.{1}".format(path, key),
+					 core_searcher[key])
+					for key in ("maxDoc", "numDocs", "warmupTime")
+				])
 
-            stats_url = posixpath.normpath(
-                "solr/{0}/admin/mbeans?stats=true&wt=json".format(core))
+			if 'query' in self.config['stats']:
+				query_keys = ("requests", "errors", "timeouts", "totalTime",
+							  "avgTimePerRequest", "avgRequestsPerSecond")
+				try:
+					select = stats["QUERYHANDLER"]["/select"]["stats"]
+					metrics.update([
+						("{0}queryhandler.select.{1}".format(path, key),
+						 select[key]) for key in query_keys])
 
-            result = self._get(stats_url)
-            if not result:
-                continue
+				except KeyError:
+					standard = stats["QUERYHANDLER"]["standard"]["stats"]
+					metrics.update([
+						("{0}queryhandler.standard.{1}".format(path, key),
+						 standard[key]) for key in query_keys])
+				try:
+					update = stats["QUERYHANDLER"]["/update"]["stats"]
+					metrics.update([
+						("{0}queryhandler.update.{1}".format(path, key),
+						 update[key])
+						for key in query_keys
+						if update[key] != 'NaN'
+					])
+				except KeyError as e: self.log.error(e)
 
-            s = result['solr-mbeans']
-            stats = dict((s[i], s[i+1]) for i in xrange(0, len(s), 2))
+			if 'replication' in self.config['stats']:
+				replication = stats["QUERYHANDLER"]["/replication"]["stats"]
+				metrics.update([
+					("{0}queryhandler.replication.{1}".format(path, key),
+					 replication[key]) for key in query_keys])
 
-            if 'core' in self.config['stats']:
-                core_searcher = stats["CORE"]["searcher"]["stats"]
-                metrics.update([
-                    ("{0}core.{1}".format(path, key),
-                     core_searcher[key])
-                    for key in ("maxDoc", "numDocs", "warmupTime")
-                ])
+			if 'update' in self.config['stats']:
+				updatehandler = \
+					stats["UPDATEHANDLER"]["updateHandler"]["stats"]
+				metrics.update([
+					("{0}updatehandler.{1}".format(path, key),
+					 updatehandler[key])
+					for key in (
+						"commits", "autocommits", "optimizes",
+						"rollbacks", "docsPending", "adds", "errors",
+						"cumulative_adds", "cumulative_errors")
+				])
 
-            if 'query' in self.config['stats']:
-                query_keys = ("requests", "errors", "timeouts", "totalTime",
-                              "avgTimePerRequest", "avgRequestsPerSecond")
-                try:
-                    select = stats["QUERYHANDLER"]["/select"]["stats"]
-                    metrics.update([
-                        ("{0}queryhandler.select.{1}".format(path, key),
-                         select[key]) for key in query_keys])
+			if 'cache' in self.config['stats']:
+				cache = stats["CACHE"]
 
-                except KeyError:
-                    standard = stats["QUERYHANDLER"]["standard"]["stats"]
-                    metrics.update([
-                        ("{0}queryhandler.standard.{1}".format(path, key),
-                         standard[key]) for key in query_keys])
-                try:
-                    update = stats["QUERYHANDLER"]["/update"]["stats"]
-                    metrics.update([
-                        ("{0}queryhandler.update.{1}".format(path, key),
-                         update[key])
-                        for key in query_keys
-                        if update[key] != 'NaN'
-                    ])
-                except Exception as e: self.log.error("************************" + str(e))
+				metrics.update([
+					("{0}cache.{1}.{2}".format(path, cache_type, key),
+					 self._try_convert(cache[cache_type]['stats'][key]))
+					for cache_type in (
+						'fieldValueCache', 'filterCache',
+						'documentCache', 'queryResultCache')
+					for key in (
+						'lookups', 'hits', 'hitratio', 'inserts',
+						'evictions', 'size', 'warmupTime',
+						'cumulative_lookups', 'cumulative_hits',
+						'cumulative_hitratio', 'cumulative_inserts',
+						'cumulative_evictions')
+				])
 
-            if 'replication' in self.config['stats']:
-                replication = stats["QUERYHANDLER"]["/replication"]["stats"]
-                metrics.update([
-                    ("{0}queryhandler.replication.{1}".format(path, key),
-                     replication[key]) for key in query_keys])
+			if 'jvm' in self.config['stats']:
+				system_url = posixpath.normpath(
+					"solr/{0}/admin/system?stats=true&wt=json".format(core))
 
-            if 'update' in self.config['stats']:
-                updatehandler = \
-                    stats["UPDATEHANDLER"]["updateHandler"]["stats"]
-                metrics.update([
-                    ("{0}updatehandler.{1}".format(path, key),
-                     updatehandler[key])
-                    for key in (
-                        "commits", "autocommits", "optimizes",
-                        "rollbacks", "docsPending", "adds", "errors",
-                        "cumulative_adds", "cumulative_errors")
-                ])
+				result = self._get(system_url)
+				if not result:
+					continue
 
-            if 'cache' in self.config['stats']:
-                cache = stats["CACHE"]
-
-                metrics.update([
-                    ("{0}cache.{1}.{2}".format(path, cache_type, key),
-                     self._try_convert(cache[cache_type]['stats'][key]))
-                    for cache_type in (
-                        'fieldValueCache', 'filterCache',
-                        'documentCache', 'queryResultCache')
-                    for key in (
-                        'lookups', 'hits', 'hitratio', 'inserts',
-                        'evictions', 'size', 'warmupTime',
-                        'cumulative_lookups', 'cumulative_hits',
-                        'cumulative_hitratio', 'cumulative_inserts',
-                        'cumulative_evictions')
-                ])
-
-            if 'jvm' in self.config['stats']:
-                system_url = posixpath.normpath(
-                    "solr/{0}/admin/system?stats=true&wt=json".format(core))
-
-                result = self._get(system_url)
-                if not result:
-                    continue
-
-                mem = result['jvm']['memory']
-                metrics.update([
-                    ('{0}jvm.mem.{1}'.format(path, key),
-                     self._try_convert(mem[key].split()[0]))
-                    for key in ('free', 'total', 'max', 'used')
-                ])
-
+				mem = result['jvm']['memory']
+				metrics.update([
+					('{0}jvm.mem.{1}'.format(path, key),
+					 self._try_convert(mem[key].split()[0]))
+					for key in ('free', 'total', 'max', 'used')
+				])
+	else:
+		self.log.error("No Solr cores present. Add a core with command: sudo -u solr ./bin/solr create -c mycorename")
+		
         for key in metrics:
             self.publish(key, metrics[key])
+
+
